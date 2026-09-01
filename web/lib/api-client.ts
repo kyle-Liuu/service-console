@@ -78,7 +78,7 @@ export interface ServiceConsoleApiClient {
   listServiceGroups(): Promise<string[]>;
   createServiceGroup(name: string): Promise<string>;
   deleteServiceGroup(name: string): Promise<NormalizedService[]>;
-  assignServiceGroup(name: string, group: string | null): Promise<NormalizedService>;
+  assignServiceGroup(name: string, group: string | null, position?: number): Promise<NormalizedService[]>;
   runServiceGroupAction(group: string, action: ServiceGroupAction): Promise<ServiceGroupActionResult>;
   createService(input: ServiceCreateInput): Promise<NormalizedService>;
   updateService(name: string, input: ServiceUpdateInput): Promise<NormalizedService>;
@@ -243,12 +243,15 @@ export function createApiClient(options: ApiClientOptions = {}): ServiceConsoleA
     async deleteServiceGroup(name) {
       return extractServices(await request<unknown>(serviceGroupPath(name), { method: "DELETE" }));
     },
-    async assignServiceGroup(name, group) {
+    async assignServiceGroup(name, group, position) {
       const payload = await request<unknown>(`/api/services/${encodeURIComponent(name)}/group`, {
         method: "PUT",
-        body: { group },
+        body: { group, ...(position === undefined ? {} : { position }) },
       });
-      return normalizeService(responseRecord(payload, "service"), name);
+      const changed = extractServices(payload);
+      return changed.length
+        ? changed
+        : [normalizeService(responseRecord(payload, "service"), name)];
     },
     async runServiceGroupAction(group, action) {
       const payload = await request<unknown>(serviceGroupPath(group, `/${action}`), { method: "POST" });

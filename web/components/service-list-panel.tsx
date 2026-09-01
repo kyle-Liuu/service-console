@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Folder,
   FolderPlus,
+  GripVertical,
   ListFilter,
   MoreHorizontal,
   Play,
@@ -14,7 +15,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { motion } from "motion/react";
-import { type DragEvent, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type PointerEvent as ReactPointerEvent, type ReactElement, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +40,21 @@ import type {
 type ServiceStatusGroup = "active" | "stopped" | "failed";
 type ServiceStatusFilter = "all" | ServiceStatusGroup;
 
+interface ServiceDropPreview {
+  service: string;
+  group: string | null;
+  visualIndex: number;
+  position: number;
+}
+
+interface ServicePointerDrag {
+  service: string;
+  pointerId: number;
+  startX: number;
+  startY: number;
+  active: boolean;
+}
+
 interface ServiceListPanelProps {
   services: NormalizedService[];
   groups: string[];
@@ -50,7 +66,7 @@ interface ServiceListPanelProps {
   onAddService?: () => void;
   onCreateGroup?: () => void;
   onDeleteGroup: (group: string) => void;
-  onMoveService: (service: string, group: string | null) => void;
+  onMoveService: (service: string, group: string | null, position: number) => void | Promise<void>;
   onGroupAction: (group: string, action: ServiceGroupAction) => void;
   onSelect: (name: string) => void;
   onAction: (name: string, action: ServiceAction) => void;
@@ -77,6 +93,10 @@ function sectionKey(group: string | null) {
   return group === null ? "__ungrouped__" : `group:${group}`;
 }
 
+function compareServiceOrder(left: NormalizedService, right: NormalizedService) {
+  return left.sortOrder - right.sortOrder || left.name.localeCompare(right.name);
+}
+
 export function ServiceListPanel({
   services,
   groups,
@@ -96,11 +116,14 @@ export function ServiceListPanel({
   const headingId = useId();
   const searchRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const pointerDragRef = useRef<ServicePointerDrag | null>(null);
+  const dropPreviewRef = useRef<ServiceDropPreview | null>(null);
   const [filter, setFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<ServiceStatusFilter>("all");
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [draggedService, setDraggedService] = useState<string | null>(null);
-  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [dropPreview, setDropPreview] = useState<ServiceDropPreview | null>(null);
+  const [pointerDrag, setPointerDrag] = useState<ServicePointerDrag | null>(null);
 
   const groupNames = useMemo(() => [...new Set([
     ...groups,
@@ -121,13 +144,13 @@ export function ServiceListPanel({
   const sections = useMemo(() => [
     ...groupNames.map((group) => ({
       group,
-      all: services.filter((service) => service.group === group),
-      visible: visibleServices.filter((service) => service.group === group),
+      all: services.filter((service) => service.group === group).sort(compareServiceOrder),
+      visible: visibleServices.filter((service) => service.group === group).sort(compareServiceOrder),
     })),
     {
       group: null,
-      all: services.filter((service) => !service.group),
-      visible: visibleServices.filter((service) => !service.group),
+      all: services.filter((service) => !service.group).sort(compareServiceOrder),
+      visible: visibleServices.filter((service) => !service.group).sort(compareServiceOrder),
     },
   ], [groupNames, services, visibleServices]);
 
@@ -165,20 +188,143 @@ export function ServiceListPanel({
     });
   };
 
-  const startDragging = (event: DragEvent<HTMLElement>, service: string) => {
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", service);
-    setDraggedService(service);
-  };
-
-  const dropInto = (event: DragEvent<HTMLElement>, group: string | null) => {
-    event.preventDefault();
-    const serviceName = draggedService || event.dataTransfer.getData("text/plain");
-    const service = services.find((candidate) => candidate.name === serviceName);
+  const resetDragging = useCallback(() => {
+    pointerDragRef.current = null;
+    dropPreviewRef.current = null;
+    setPointerDrag(null);
     setDraggedService(null);
-    setDropTarget(null);
-    if (!service || service.group === group) return;
-    onMoveService(service.name, group);
+    setDropPreview(null);
+  }, []);
+
+  const updateDropPreview = useCallback((preview: ServiceDropPreview | null) => {
+    dropPreviewRef.current = preview;
+    setDropPreview(preview);
+  }, []);
+
+  const commitMove = useCallback(async (
+    serviceName: string,
+    group: string | null,
+    position: number,
+  ) => {
+    const service = services.find((candidate) => candidate.name === serviceName);
+    if (!service) return false;
+    if (service.group === group) {
+      const currentPosition = services
+        .filter((candidate) => candidate.group === group)
+        .sort(compareServiceOrder)
+        .findIndex((candidate) => candidate.name === service.name);
+      if (currentPosition === position) return false;
+    }
+    await onMoveService(service.name, group, position);
+    return true;
+  }, [onMoveService, services]);
+
+  useEffect(() => {
+    if (!pointerDrag) return;
+
+    const previewAt = (drag: ServicePointerDrag, clientX: number, clientY: number) => {
+      const currentPlaceholder = document.querySelector<HTMLElement>("[data-service-drop-preview]");
+      if (currentPlaceholder && dropPreviewRef.current?.service === drag.service) {
+        const bounds = currentPlaceholder.getBoundingClientRect();
+        if (
+          clientX >= bounds.left
+          && clientX <= bounds.right
+          && clientY >= bounds.top
+          && clientY <= bounds.bottom
+        ) {
+          return;
+        }
+      }
+      const element = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+      const sectionElement = element?.closest<HTMLElement>("[data-service-group-key]");
+      const key = sectionElement?.dataset.serviceGroupKey;
+      const section = sections.find((candidate) => sectionKey(candidate.group) === key);
+      if (!section) {
+        updateDropPreview(null);
+        return;
+      }
+      const allTargets = section.all.filter((service) => service.name !== drag.service);
+      const visibleTargets = section.visible.filter((service) => service.name !== drag.service);
+      const itemElement = element?.closest<HTMLElement>("[data-service-drop-item]");
+      const targetName = itemElement?.dataset.serviceDropItem;
+      if (targetName && targetName !== pointerDrag.service) {
+        const allTargetIndex = allTargets.findIndex((service) => service.name === targetName);
+        const visibleTargetIndex = visibleTargets.findIndex((service) => service.name === targetName);
+        if (allTargetIndex >= 0 && visibleTargetIndex >= 0) {
+          const bounds = itemElement.getBoundingClientRect();
+          const placeAfter = clientY >= bounds.top + bounds.height / 2;
+          updateDropPreview({
+            service: drag.service,
+            group: section.group,
+            visualIndex: visibleTargetIndex + (placeAfter ? 1 : 0),
+            position: allTargetIndex + (placeAfter ? 1 : 0),
+          });
+          return;
+        }
+      }
+      const overHeader = Boolean(element?.closest("[data-service-group-header]"));
+      updateDropPreview({
+        service: drag.service,
+        group: section.group,
+        visualIndex: overHeader ? 0 : visibleTargets.length,
+        position: overHeader ? 0 : allTargets.length,
+      });
+    };
+
+    const movePointer = (event: PointerEvent) => {
+      const drag = pointerDragRef.current;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const distance = Math.hypot(
+        event.clientX - drag.startX,
+        event.clientY - drag.startY,
+      );
+      if (!drag.active && distance < 5) return;
+      event.preventDefault();
+      if (!drag.active) {
+        drag.active = true;
+        setDraggedService(drag.service);
+      }
+      previewAt(drag, event.clientX, event.clientY);
+    };
+
+    const finishPointer = (event: PointerEvent) => {
+      const drag = pointerDragRef.current;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const preview = dropPreviewRef.current;
+      if (drag.active && preview?.service === drag.service) {
+        pointerDragRef.current = null;
+        setPointerDrag(null);
+        void commitMove(drag.service, preview.group, preview.position)
+          .finally(resetDragging);
+        return;
+      }
+      resetDragging();
+    };
+
+    window.addEventListener("pointermove", movePointer, { passive: false });
+    window.addEventListener("pointerup", finishPointer);
+    window.addEventListener("pointercancel", resetDragging);
+    return () => {
+      window.removeEventListener("pointermove", movePointer);
+      window.removeEventListener("pointerup", finishPointer);
+      window.removeEventListener("pointercancel", resetDragging);
+    };
+  }, [commitMove, pointerDrag, resetDragging, sections, updateDropPreview]);
+
+  const beginPointerDrag = (event: ReactPointerEvent<HTMLElement>, service: string) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const drag = {
+      service,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      active: false,
+    };
+    pointerDragRef.current = drag;
+    setPointerDrag(drag);
+    updateDropPreview(null);
   };
 
   return (
@@ -265,26 +411,75 @@ export function ServiceListPanel({
           const canStart = all.some((service) => ["STOPPED", "EXITED", "FAILED"].includes(service.status));
           const canStop = all.some((service) => ["RUNNING", "STARTING"].includes(service.status));
           const running = all.filter((service) => ["RUNNING", "STARTING"].includes(service.status)).length;
-          const activeDrop = dropTarget === key;
+          const activeDrop = dropPreview?.service === draggedService && dropPreview.group === group;
+          const serviceItems: ReactElement[] = [];
+          let visualIndex = 0;
+          const addDropPlaceholder = () => {
+            if (!activeDrop || dropPreview.visualIndex !== visualIndex) return;
+            serviceItems.push(
+              <motion.div
+                key={`drop-preview:${draggedService}`}
+                layoutId="service-drop-preview"
+                data-service-drop-preview
+                className="pointer-events-none overflow-hidden px-2 py-1"
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 68, opacity: 1 }}
+                transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+                aria-label={`${draggedService} 的预计落点`}
+              >
+                <div className="flex h-[60px] items-center justify-center gap-1.5 rounded-lg border border-dashed border-primary/70 bg-card/70 text-[10px] font-medium text-primary opacity-80 shadow-inner backdrop-blur-sm">
+                  <GripVertical className="size-3.5" aria-hidden="true" />
+                  <span className="max-w-[70%] truncate">{draggedService}</span>
+                  <span className="text-primary/75">将放到这里</span>
+                </div>
+              </motion.div>,
+            );
+          };
+          for (const service of visible) {
+            if (service.name !== draggedService) addDropPlaceholder();
+            const serviceBusy = busyServices.has(service.name);
+            serviceItems.push(
+              <motion.div
+                key={service.name}
+                data-service-drop-item={service.name}
+                layout="position"
+                transition={{ layout: { duration: 0.18, ease: [0.22, 1, 0.36, 1] } }}
+                className={cn(
+                  "relative transition-opacity duration-150 [&_.service-card>button]:pl-8",
+                  draggedService === service.name && "opacity-30",
+                )}
+              >
+                <span
+                  data-service-drag-handle={service.name}
+                  className={cn(
+                    "absolute top-1/2 left-1.5 z-10 flex h-10 w-4 -translate-y-1/2 touch-none select-none items-center justify-center rounded text-muted-foreground/55 transition-colors",
+                    !serviceBusy && "cursor-grab hover:bg-accent hover:text-foreground active:cursor-grabbing",
+                  )}
+                  title={serviceBusy ? undefined : `拖拽 ${service.name} 到目标分组或排序位置`}
+                  onPointerDown={serviceBusy ? undefined : (event) => beginPointerDrag(event, service.name)}
+                >
+                  <GripVertical className="size-3.5" aria-hidden="true" />
+                </span>
+                <ServiceCard
+                  service={service}
+                  selected={selectedName === service.name}
+                  busy={serviceBusy}
+                  onSelect={() => onSelect(service.name)}
+                  onAction={(action) => onAction(service.name, action)}
+                />
+              </motion.div>,
+            );
+            if (service.name !== draggedService) visualIndex += 1;
+          }
+          addDropPlaceholder();
           return (
             <section
               key={key}
               className={cn("border-b border-border/70 transition-colors", activeDrop && "bg-primary/8 ring-2 ring-inset ring-primary/55")}
               aria-label={group ?? "未分组"}
-              onDragEnter={(event) => {
-                event.preventDefault();
-                setDropTarget(key);
-              }}
-              onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-              }}
-              onDragLeave={(event) => {
-                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
-              }}
-              onDrop={(event) => dropInto(event, group)}
+              data-service-group-key={key}
             >
-              <div className={cn("flex min-h-9 items-center gap-1 px-2", draggedService && "border-b border-dashed border-primary/25")}>
+              <div data-service-group-header className={cn("flex min-h-9 items-center gap-1 px-2", draggedService && "border-b border-dashed border-primary/25")}>
                 <button
                   type="button"
                   className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-1 py-1 text-left outline-none hover:bg-accent/45 focus-visible:ring-2 focus-visible:ring-ring/80"
@@ -315,30 +510,7 @@ export function ServiceListPanel({
               </div>
 
               {!collapsed ? (
-                visible.length ? visible.map((service) => {
-                  const serviceBusy = busyServices.has(service.name);
-                  return (
-                    <div
-                      key={service.name}
-                      draggable={!serviceBusy}
-                      className={cn(!serviceBusy && "cursor-grab active:cursor-grabbing")}
-                      title={serviceBusy ? undefined : "拖拽到目标分组"}
-                      onDragStart={(event) => startDragging(event, service.name)}
-                      onDragEnd={() => {
-                        setDraggedService(null);
-                        setDropTarget(null);
-                      }}
-                    >
-                      <ServiceCard
-                        service={service}
-                        selected={selectedName === service.name}
-                        busy={serviceBusy}
-                        onSelect={() => onSelect(service.name)}
-                        onAction={(action) => onAction(service.name, action)}
-                      />
-                    </div>
-                  );
-                }) : (
+                serviceItems.length ? serviceItems : (
                   <div className={cn("px-4 py-3 text-center text-[9px] text-muted-foreground", activeDrop && "font-medium text-primary")}>
                     {activeDrop ? `松开以移入${group ? `“${group}”` : "未分组"}` : all.length ? "没有匹配当前筛选的服务" : "拖拽服务到此分组"}
                   </div>

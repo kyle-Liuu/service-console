@@ -83,6 +83,7 @@ export interface AppUpdateStatus {
 export interface ServiceDefinition {
   name: string;
   group: string | null;
+  sort_order: number;
   command: string;
   cwd: string;
   env: Record<string, string>;
@@ -90,8 +91,8 @@ export interface ServiceDefinition {
   stop_timeout: number;
 }
 
-export type ServiceCreateInput = ServiceDefinition;
-export type ServiceUpdateInput = Omit<ServiceDefinition, "name">;
+export type ServiceCreateInput = Omit<ServiceDefinition, "sort_order">;
+export type ServiceUpdateInput = Omit<ServiceDefinition, "name" | "sort_order">;
 
 export interface ServiceSnapshot extends ServiceDefinition {
   state: ServiceState;
@@ -109,6 +110,7 @@ export interface ServiceSnapshot extends ServiceDefinition {
 export interface NormalizedService {
   name: string;
   group: string | null;
+  sortOrder: number;
   command: string;
   cwd: string;
   env: Record<string, string>;

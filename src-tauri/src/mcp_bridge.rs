@@ -296,9 +296,9 @@ fn tool_metadata(name: &str) -> (&'static str, Value, bool, bool) {
             false,
         ),
         "service_group_assign" => (
-            "Move a service to a group, or omit/pass null for group to ungroup it.",
+            "Move a service to a group and optionally place it at a zero-based position; omit/pass null for group to ungroup it.",
             object_schema(
-                json!({"name":string(),"group":optional_string()}),
+                json!({"name":string(),"group":optional_string(),"position":{"type":"integer","minimum":0}}),
                 &["name"],
             ),
             false,
@@ -504,7 +504,10 @@ async fn call_tool(client: &ControllerClient, name: &str, args: &Value) -> Resul
                 .request(
                     Method::PUT,
                     &format!("/api/services/{service}/group"),
-                    Some(json!({"group":args.get("group").cloned().unwrap_or(Value::Null)})),
+                    Some(json!({
+                        "group":args.get("group").cloned().unwrap_or(Value::Null),
+                        "position":args.get("position").cloned().unwrap_or(Value::Null)
+                    })),
                 )
                 .await
         }

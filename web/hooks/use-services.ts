@@ -260,10 +260,10 @@ export function useServices({ token, enabled, onError }: UseServicesOptions) {
     return changed;
   }, [api, mergeService]);
 
-  const assignGroup = useCallback(async (name: string, group: string | null) => {
-    const service = await withBusyService(name, () => api.assignServiceGroup(name, group));
-    mergeService(service);
-    return service;
+  const assignGroup = useCallback(async (name: string, group: string | null, position?: number) => {
+    const changed = await withBusyService(name, () => api.assignServiceGroup(name, group, position));
+    changed.forEach(mergeService);
+    return changed.find((service) => service.name === name);
   }, [api, mergeService, withBusyService]);
 
   const runGroupAction = useCallback(async (group: string, action: ServiceGroupAction) => {

@@ -67,6 +67,8 @@ struct ServiceUpdateRequest {
 #[derive(Debug, Deserialize)]
 struct ServiceGroupRequest {
     group: Option<String>,
+    #[serde(default)]
+    position: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -679,6 +681,7 @@ async fn update_service(
     let definition = ServiceDefinition {
         name: name.clone(),
         group: body.group,
+        sort_order: 0,
         command: body.command,
         cwd: body.cwd,
         env: body.env,
@@ -694,8 +697,16 @@ async fn assign_service_group(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<ServiceGroupRequest>,
 ) -> AppResult<Json<Value>> {
-    let service = state.manager.assign_group(&name, body.group).await?;
-    Ok(Json(json!({"service": service})))
+    let services = state
+        .manager
+        .move_service(&name, body.group, body.position)
+        .await?;
+    let service = services
+        .iter()
+        .find(|service| service.name == name)
+        .cloned()
+        .ok_or_else(|| AppError::not_found(name))?;
+    Ok(Json(json!({"service": service, "services": services})))
 }
 
 async fn delete_service(

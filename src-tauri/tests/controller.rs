@@ -371,6 +371,7 @@ fn definition(name: &str, command: impl Into<String>, cwd: &std::path::Path) -> 
     ServiceDefinition {
         name: name.into(),
         group: None,
+        sort_order: 0,
         command: command.into(),
         cwd: cwd.to_string_lossy().into_owned(),
         env: BTreeMap::new(),
@@ -514,6 +515,31 @@ async fn groups_persist_assignments_and_control_all_members() {
             .all(|service| service.state == ServiceState::Stopped)
     );
 
+    let moved = manager
+        .move_service("worker-a", Some("empty".into()), Some(0))
+        .await
+        .unwrap();
+    let moved_service = moved
+        .iter()
+        .find(|service| service.name == "worker-a")
+        .unwrap();
+    assert_eq!(moved_service.group.as_deref(), Some("empty"));
+    assert_eq!(moved_service.sort_order, 0);
+    let moved = manager
+        .move_service("worker-a", Some("workers".into()), Some(1))
+        .await
+        .unwrap();
+    let moved_service = moved
+        .iter()
+        .find(|service| service.name == "worker-a")
+        .unwrap();
+    let first_service = moved
+        .iter()
+        .find(|service| service.name == "worker-b")
+        .unwrap();
+    assert_eq!(moved_service.group.as_deref(), Some("workers"));
+    assert_eq!(moved_service.sort_order, 1);
+    assert_eq!(first_service.sort_order, 0);
     let moved = manager.assign_group("worker-a", None).await.unwrap();
     assert_eq!(moved.group, None);
     let ungrouped = manager.delete_group("workers").await.unwrap();

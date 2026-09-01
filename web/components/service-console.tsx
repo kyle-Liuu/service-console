@@ -281,9 +281,9 @@ function ServiceConsoleContent() {
     }
   }, [groupName, serviceState, showSuccess]);
 
-  const moveServiceToGroup = useCallback(async (service: string, group: string | null) => {
+  const moveServiceToGroup = useCallback(async (service: string, group: string | null, position: number) => {
     try {
-      await serviceState.assignGroup(service, group);
+      await serviceState.assignGroup(service, group, position);
       showSuccess("服务分组已更新", `${service} → ${group ?? "未分组"}`);
     } catch (error) {
       showError("调整分组失败", error instanceof Error ? error.message : String(error));
@@ -407,7 +407,7 @@ function ServiceConsoleContent() {
           setGroupDialogOpen(true);
         }}
         onDeleteGroup={setDeleteGroupTarget}
-        onMoveService={(service, group) => void moveServiceToGroup(service, group)}
+        onMoveService={moveServiceToGroup}
         onGroupAction={(group, action) => void runGroupAction(group, action)}
         onClearLogs={() => {
           serviceState.clearVisibleLogs();

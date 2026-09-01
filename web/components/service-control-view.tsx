@@ -33,7 +33,7 @@ interface ServiceControlViewProps {
   onAddService: () => void;
   onCreateGroup: () => void;
   onDeleteGroup: (group: string) => void;
-  onMoveService: (service: string, group: string | null) => void;
+  onMoveService: (service: string, group: string | null, position: number) => void | Promise<void>;
   onGroupAction: (group: string, action: ServiceGroupAction) => void;
   onClearLogs: () => void;
 }

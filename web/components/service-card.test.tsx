@@ -8,6 +8,7 @@ function serviceFixture(status: ServiceState): NormalizedService {
   return {
     name: "pd-qa-backend",
     group: null,
+    sortOrder: 0,
     command: "uv run backend/run.py",
     cwd: "/workspace/pd-qa-backend",
     env: {},

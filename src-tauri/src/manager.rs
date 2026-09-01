@@ -63,6 +63,83 @@ impl GroupAction {
     }
 }
 
+fn ordered_group_names(
+    services: &BTreeMap<String, ManagedService>,
+    group: Option<&str>,
+    excluded: &str,
+) -> Vec<String> {
+    let mut names: Vec<_> = services
+        .iter()
+        .filter(|(name, service)| {
+            name.as_str() != excluded && service.definition.group.as_deref() == group
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    names.sort_by(|left, right| {
+        let left_service = services.get(left).expect("ordered service is present");
+        let right_service = services.get(right).expect("ordered service is present");
+        left_service
+            .definition
+            .sort_order
+            .cmp(&right_service.definition.sort_order)
+            .then_with(|| left.cmp(right))
+    });
+    names
+}
+
+fn next_group_sort_order(services: &BTreeMap<String, ManagedService>, group: Option<&str>) -> i64 {
+    services
+        .values()
+        .filter(|service| service.definition.group.as_deref() == group)
+        .map(|service| service.definition.sort_order)
+        .max()
+        .map_or(0, |sort_order| sort_order.saturating_add(1))
+}
+
+fn service_snapshot_order(left: &ServiceSnapshot, right: &ServiceSnapshot) -> std::cmp::Ordering {
+    left.group
+        .cmp(&right.group)
+        .then_with(|| left.sort_order.cmp(&right.sort_order))
+        .then_with(|| left.name.cmp(&right.name))
+}
+
+fn normalize_definition_sort_orders(definitions: &mut BTreeMap<String, ServiceDefinition>) -> bool {
+    let groups: BTreeSet<_> = definitions
+        .values()
+        .map(|definition| definition.group.clone())
+        .collect();
+    let mut changed = false;
+    for group in groups {
+        let mut names: Vec<_> = definitions
+            .iter()
+            .filter(|(_, definition)| definition.group == group)
+            .map(|(name, _)| name.clone())
+            .collect();
+        names.sort_by(|left, right| {
+            definitions
+                .get(left)
+                .expect("definition is present")
+                .sort_order
+                .cmp(
+                    &definitions
+                        .get(right)
+                        .expect("definition is present")
+                        .sort_order,
+                )
+                .then_with(|| left.cmp(right))
+        });
+        for (sort_order, name) in names.into_iter().enumerate() {
+            let definition = definitions.get_mut(&name).expect("definition is present");
+            let sort_order = sort_order as i64;
+            if definition.sort_order != sort_order {
+                definition.sort_order = sort_order;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub struct ServiceManager {
     store: DefinitionStore,
     services: RwLock<BTreeMap<String, ManagedService>>,
@@ -76,7 +153,9 @@ pub struct ServiceManager {
 impl ServiceManager {
     pub fn new(data_dir: impl AsRef<Path>) -> AppResult<Arc<Self>> {
         let store = DefinitionStore::new(data_dir)?;
-        let definitions = store.load()?;
+        let mut definitions = store.load()?;
+        normalize_definition_sort_orders(&mut definitions);
+        store.save(definitions.values())?;
         let mut groups = store.load_groups()?;
         let mut services = BTreeMap::new();
         for (name, definition) in definitions {
@@ -200,29 +279,59 @@ impl ServiceManager {
             return Err(AppError::not_found(format!("service group: {name}")));
         }
         let mut services = self.services.write().await;
-        let affected: Vec<String> = services
+        let mut affected: Vec<String> = services
             .iter()
             .filter(|(_, service)| service.definition.group.as_deref() == Some(name.as_str()))
             .map(|(service_name, _)| service_name.clone())
             .collect();
-        for service_name in &affected {
+        affected.sort_by(|left, right| {
             services
+                .get(left)
+                .expect("affected service is present")
+                .definition
+                .sort_order
+                .cmp(
+                    &services
+                        .get(right)
+                        .expect("affected service is present")
+                        .definition
+                        .sort_order,
+                )
+                .then_with(|| left.cmp(right))
+        });
+        let previous: Vec<_> = affected
+            .iter()
+            .map(|service_name| {
+                (
+                    service_name.clone(),
+                    services
+                        .get(service_name)
+                        .expect("affected service is present")
+                        .definition
+                        .clone(),
+                )
+            })
+            .collect();
+        let mut next_sort_order = next_group_sort_order(&services, None);
+        for service_name in &affected {
+            let definition = &mut services
                 .get_mut(service_name)
                 .expect("affected service remains present")
-                .definition
-                .group = None;
+                .definition;
+            definition.group = None;
+            definition.sort_order = next_sort_order;
+            next_sort_order = next_sort_order.saturating_add(1);
         }
         let persist_result = self
             .persist_locked(&services)
             .and_then(|_| self.store.save_groups(&groups));
         if let Err(error) = persist_result {
             groups.insert(name.clone());
-            for service_name in &affected {
+            for (service_name, definition) in previous {
                 services
-                    .get_mut(service_name)
+                    .get_mut(&service_name)
                     .expect("affected service remains present while rolling back")
-                    .definition
-                    .group = Some(name.clone());
+                    .definition = definition;
             }
             let _ = self.persist_locked(&services);
             let _ = self.store.save_groups(&groups);
@@ -249,6 +358,19 @@ impl ServiceManager {
         service_name: &str,
         group: Option<String>,
     ) -> AppResult<ServiceSnapshot> {
+        self.move_service(service_name, group, None)
+            .await?
+            .into_iter()
+            .find(|service| service.name == service_name)
+            .ok_or_else(|| AppError::not_found(service_name.to_owned()))
+    }
+
+    pub async fn move_service(
+        &self,
+        service_name: &str,
+        group: Option<String>,
+        position: Option<usize>,
+    ) -> AppResult<Vec<ServiceSnapshot>> {
         let group = match group {
             Some(group) if !group.trim().is_empty() => Some(normalize_group_name(&group)?),
             _ => None,
@@ -261,34 +383,97 @@ impl ServiceManager {
         {
             return Err(AppError::not_found(format!("service group: {group}")));
         }
-        let snapshot = {
+        let snapshots = {
             let mut services = self.services.write().await;
-            let service = services
-                .get_mut(service_name)
-                .ok_or_else(|| AppError::not_found(service_name.to_owned()))?;
-            let previous = service.definition.group.clone();
-            service.definition.group = group.clone();
-            let snapshot = service.snapshot();
+            let source_group = services
+                .get(service_name)
+                .ok_or_else(|| AppError::not_found(service_name.to_owned()))?
+                .definition
+                .group
+                .clone();
+            if position.is_none() && source_group == group {
+                return Ok(vec![
+                    services
+                        .get(service_name)
+                        .expect("service remains present")
+                        .snapshot(),
+                ]);
+            }
+
+            let previous: Vec<_> = services
+                .iter()
+                .filter(|(name, service)| {
+                    name.as_str() == service_name
+                        || service.definition.group == source_group
+                        || service.definition.group == group
+                })
+                .map(|(name, service)| (name.clone(), service.definition.clone()))
+                .collect();
+            let source_names =
+                ordered_group_names(&services, source_group.as_deref(), service_name);
+            let mut destination_names = if source_group == group {
+                source_names.clone()
+            } else {
+                ordered_group_names(&services, group.as_deref(), service_name)
+            };
+            let destination_position = position
+                .unwrap_or(destination_names.len())
+                .min(destination_names.len());
+            destination_names.insert(destination_position, service_name.to_owned());
+
+            if source_group != group {
+                for (sort_order, name) in source_names.iter().enumerate() {
+                    services
+                        .get_mut(name)
+                        .expect("source group service remains present")
+                        .definition
+                        .sort_order = sort_order as i64;
+                }
+            }
+            for (sort_order, name) in destination_names.iter().enumerate() {
+                let service = services
+                    .get_mut(name)
+                    .expect("destination group service remains present");
+                service.definition.group = group.clone();
+                service.definition.sort_order = sort_order as i64;
+            }
+
             if let Err(error) = self.persist_locked(&services) {
-                services
-                    .get_mut(service_name)
-                    .expect("service remains present while rolling back group assignment")
-                    .definition
-                    .group = previous;
+                for (name, definition) in previous {
+                    services
+                        .get_mut(&name)
+                        .expect("service remains present while rolling back move")
+                        .definition = definition;
+                }
                 return Err(error);
             }
-            snapshot
+            let mut snapshots: Vec<_> = services
+                .values()
+                .filter(|service| {
+                    service.definition.group == source_group || service.definition.group == group
+                })
+                .map(ManagedService::snapshot)
+                .collect();
+            snapshots.sort_by(service_snapshot_order);
+            snapshots
         };
         drop(groups);
-        self.emit_status(&snapshot);
+        for snapshot in &snapshots {
+            self.emit_status(snapshot);
+        }
+        let moved = snapshots
+            .iter()
+            .find(|service| service.name == service_name)
+            .expect("moved service is included in affected snapshots");
         runtime_log::info(
             "service.group_changed",
             format_args!(
-                "name={service_name} group={}",
-                snapshot.group.as_deref().unwrap_or("ungrouped")
+                "name={service_name} group={} sort_order={}",
+                moved.group.as_deref().unwrap_or("ungrouped"),
+                moved.sort_order
             ),
         );
-        Ok(snapshot)
+        Ok(snapshots)
     }
 
     pub async fn start_group(self: &Arc<Self>, group: &str) -> AppResult<GroupActionResult> {
@@ -377,7 +562,7 @@ impl ServiceManager {
     }
 
     pub async fn add_service(&self, definition: ServiceDefinition) -> AppResult<ServiceSnapshot> {
-        let definition = definition.normalize()?;
+        let mut definition = definition.normalize()?;
         let groups = self.groups.read().await;
         if let Some(group) = definition.group.as_deref()
             && !groups.contains(group)
@@ -392,6 +577,7 @@ impl ServiceManager {
                     "service already exists: {name}"
                 )));
             }
+            definition.sort_order = next_group_sort_order(&services, definition.group.as_deref());
             let service = ManagedService::new(definition, Vec::new());
             let snapshot = service.snapshot();
             services.insert(name.clone(), service);
@@ -412,7 +598,7 @@ impl ServiceManager {
         mut definition: ServiceDefinition,
     ) -> AppResult<ServiceSnapshot> {
         definition.name = name.to_owned();
-        let definition = definition.normalize()?;
+        let mut definition = definition.normalize()?;
         let lifecycle = self.lifecycle_lock(name).await?;
         let _lifecycle = lifecycle.lock().await;
         let groups = self.groups.read().await;
@@ -423,12 +609,24 @@ impl ServiceManager {
         }
         let snapshot = {
             let mut services = self.services.write().await;
-            let service = services
+            let previous = services
+                .get(name)
+                .ok_or_else(|| AppError::not_found(name.to_owned()))?
+                .definition
+                .clone();
+            definition.sort_order = if definition.group == previous.group {
+                previous.sort_order
+            } else {
+                next_group_sort_order(&services, definition.group.as_deref())
+            };
+            services
                 .get_mut(name)
-                .ok_or_else(|| AppError::not_found(name.to_owned()))?;
-            let previous = service.definition.clone();
-            service.definition = definition;
-            let snapshot = service.snapshot();
+                .expect("service remains present")
+                .definition = definition;
+            let snapshot = services
+                .get(name)
+                .expect("service remains present")
+                .snapshot();
             if let Err(error) = self.persist_locked(&services) {
                 services
                     .get_mut(name)

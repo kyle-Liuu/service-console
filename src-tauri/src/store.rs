@@ -15,7 +15,7 @@ use crate::{
 
 #[derive(Debug, Serialize, Deserialize)]
 struct DefinitionFile {
-    #[serde(default = "definition_version")]
+    #[serde(default = "service_definition_version")]
     version: u32,
     #[serde(default)]
     services: Vec<ServiceDefinition>,
@@ -23,13 +23,17 @@ struct DefinitionFile {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct GroupFile {
-    #[serde(default = "definition_version")]
+    #[serde(default = "group_definition_version")]
     version: u32,
     #[serde(default)]
     groups: Vec<String>,
 }
 
-fn definition_version() -> u32 {
+fn service_definition_version() -> u32 {
+    2
+}
+
+fn group_definition_version() -> u32 {
     1
 }
 
@@ -90,7 +94,7 @@ impl DefinitionStore {
         definitions: impl IntoIterator<Item = &'a ServiceDefinition>,
     ) -> AppResult<()> {
         let payload = DefinitionFile {
-            version: 1,
+            version: service_definition_version(),
             services: definitions.into_iter().cloned().collect(),
         };
         let mut encoded = serde_json::to_vec_pretty(&payload)?;
@@ -215,6 +219,7 @@ mod tests {
         ServiceDefinition {
             name: name.into(),
             group: None,
+            sort_order: 0,
             command: "echo ok".into(),
             cwd: ".".into(),
             env: BTreeMap::new(),
@@ -230,6 +235,10 @@ mod tests {
         let definitions = [definition("api"), definition("web")];
         store.save(definitions.iter()).unwrap();
         assert_eq!(store.load().unwrap().len(), 2);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store.definitions_path).unwrap()).unwrap();
+        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["services"][0]["sort_order"], 0);
 
         store
             .save_groups(&BTreeSet::from(["Backend".into(), "Workers".into()]))

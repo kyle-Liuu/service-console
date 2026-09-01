@@ -321,7 +321,9 @@ describe("API client", () => {
 
     await expect(client.listServiceGroups()).resolves.toEqual(["后端/核心"]);
     await expect(client.createServiceGroup("后端/核心")).resolves.toBe("后端/核心");
-    await expect(client.assignServiceGroup("api worker", "后端/核心")).resolves.toMatchObject({ group: "后端/核心" });
+    await expect(client.assignServiceGroup("api worker", "后端/核心", 0)).resolves.toEqual([
+      expect.objectContaining({ group: "后端/核心" }),
+    ]);
     await expect(client.runServiceGroupAction("后端/核心", "start")).resolves.toMatchObject({
       group: "后端/核心",
       action: "start",
@@ -333,7 +335,7 @@ describe("API client", () => {
     expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/service-groups");
     expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toEqual({ name: "后端/核心" });
     expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/services/api%20worker/group");
-    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({ group: "后端/核心" });
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toEqual({ group: "后端/核心", position: 0 });
     expect(fetchMock.mock.calls[3]?.[0]).toBe("/api/service-groups/%E5%90%8E%E7%AB%AF%2F%E6%A0%B8%E5%BF%83/start");
     expect(fetchMock.mock.calls[4]?.[0]).toBe("/api/service-groups/%E5%90%8E%E7%AB%AF%2F%E6%A0%B8%E5%BF%83");
   });

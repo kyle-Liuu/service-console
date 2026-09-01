@@ -35,6 +35,7 @@ function serviceFixture(): NormalizedService {
   return {
     name: "backend",
     group: null,
+    sortOrder: 0,
     command: "uv run backend/run.py",
     cwd: "/workspace",
     env: {},

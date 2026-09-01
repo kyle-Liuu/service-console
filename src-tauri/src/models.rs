@@ -23,6 +23,8 @@ pub struct ServiceDefinition {
     pub name: String,
     #[serde(default)]
     pub group: Option<String>,
+    #[serde(default)]
+    pub sort_order: i64,
     pub command: String,
     #[serde(default = "default_cwd")]
     pub cwd: String,
@@ -185,6 +187,7 @@ impl ManagedService {
         ServiceSnapshot {
             name: self.definition.name.clone(),
             group: self.definition.group.clone(),
+            sort_order: self.definition.sort_order,
             command: self.definition.command.clone(),
             cwd: self.definition.cwd.clone(),
             env: self.definition.env.clone(),
@@ -211,6 +214,7 @@ impl ManagedService {
 pub struct ServiceSnapshot {
     pub name: String,
     pub group: Option<String>,
+    pub sort_order: i64,
     pub command: String,
     pub cwd: String,
     pub env: BTreeMap<String, String>,
@@ -250,6 +254,7 @@ mod tests {
         ServiceDefinition {
             name: " demo ".into(),
             group: None,
+            sort_order: 0,
             command: " echo ok ".into(),
             cwd: cwd.into(),
             env: BTreeMap::new(),

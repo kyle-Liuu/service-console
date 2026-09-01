@@ -54,6 +54,7 @@ export function normalizeService(raw: unknown, fallbackName = ""): NormalizedSer
   return {
     name: String(source.name ?? definition.name ?? fallbackName),
     group: asNullableString(source.group ?? definition.group),
+    sortOrder: asNumber(source.sort_order, definition.sort_order) ?? 0,
     command: String(source.command ?? definition.command ?? ""),
     cwd: String(source.cwd ?? definition.cwd ?? ""),
     env: normalizeEnvironment(env),
