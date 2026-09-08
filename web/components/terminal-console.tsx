@@ -25,6 +25,18 @@ function logKey(entry: NormalizedLogEntry) {
   return `${entry.timestamp ?? ""}\u0000${entry.stream}\u0000${entry.message}`;
 }
 
+function appendStartIndex(previous: readonly string[], next: readonly string[]) {
+  if (!previous.length) return 0;
+  if (!next.length) return null;
+  const overlapStart = previous.indexOf(next[0]);
+  if (overlapStart < 0) return null;
+  const overlapLength = previous.length - overlapStart;
+  if (overlapLength > next.length) return null;
+  return previous.slice(overlapStart).every((key, index) => next[index] === key)
+    ? overlapLength
+    : null;
+}
+
 interface TerminalConsoleProps {
   service: NormalizedService | null;
   logs: NormalizedLogEntry[];
@@ -154,22 +166,27 @@ export function TerminalConsole({
   }, [active]);
 
   useEffect(() => {
+    renderRevisionRef.current += 1;
+    renderedRef.current = { service: null, keys: [] };
+  }, [service?.name]);
+
+  useEffect(() => {
     if (!ready) return;
     const terminal = terminalRef.current;
     if (!terminal) return;
-    const revision = ++renderRevisionRef.current;
+    const revision = renderRevisionRef.current;
     const serviceName = service?.name ?? null;
     const nextKeys = logs.map(logKey);
-    const previous = renderedRef.current;
-    const appendOnly = previous.service === serviceName
-      && previous.keys.length <= nextKeys.length
-      && previous.keys.every((key, index) => nextKeys[index] === key);
-    const pendingEntries = appendOnly ? logs.slice(previous.keys.length) : logs;
 
     const write = (value: string) => new Promise<void>((resolve) => terminal.write(value, resolve));
     renderQueueRef.current = renderQueueRef.current.then(async () => {
       if (renderRevisionRef.current !== revision) return;
-      if (!appendOnly) terminal.reset();
+      const previous = renderedRef.current;
+      const appendStart = previous.service === serviceName
+        ? appendStartIndex(previous.keys, nextKeys)
+        : null;
+      const pendingEntries = appendStart === null ? logs : logs.slice(appendStart);
+      if (appendStart === null) terminal.reset();
       for (let index = 0; index < pendingEntries.length; index += 100) {
         if (renderRevisionRef.current !== revision) return;
         const chunk = pendingEntries.slice(index, index + 100).map(formatTerminalEntry).join("");
